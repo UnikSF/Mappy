@@ -1,0 +1,8 @@
+/target
+.idea/
+*.pem
+.env
+.env.*
+!.env.example
+*.iml
+*.zip
