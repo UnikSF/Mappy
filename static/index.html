@@ -406,7 +406,11 @@ async function optimizeOrder() {
       vehicles: stops.map(s => ({ lat: s.lat, lon: s.lon, label: s.label })),
       zones: 1
     });
-    const res = await fetch('/api/solve', {
+    // Mount-aware base: "/mappy" behind the proxy (which strips it before the
+    // Rust app sees "/api/solve"), "" when served standalone. An absolute
+    // "/api/solve" would bypass the /mappy route and 404 on the landing.
+    const apiBase = (location.pathname.match(/^.*?\/mappy/) || [""])[0];
+    const res = await fetch(apiBase + '/api/solve', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body
