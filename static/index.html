@@ -135,6 +135,7 @@
   #btn-nav      { background: #27ae60; color: #fff; }
   #btn-nav.navigating { background: #e74c3c; }
   #btn-clear    { background: #2c2c54; color: #aaa; }
+  #btn-import   { background: #0f3460; color: #cfe0ff; }
   #btn-demo     { background: #16213e; color: #555; font-size: 11px; }
 
   /* Status + info */
@@ -200,6 +201,7 @@
   <button id="btn-route"    onclick="planRoute()">Plan Route</button>
   <button id="btn-optimize" onclick="optimizeOrder()">Optimize Order</button>
   <button id="btn-nav"      onclick="startNavigation()">▶ Start Navigation</button>
+  <button id="btn-import"   onclick="importGoogleMaps()">📥 Import Google Maps</button>
   <button id="btn-clear"    onclick="clearAll()">Clear All</button>
   <button id="btn-demo"     onclick="loadDemo()">Load demo</button>
   <div id="status"></div>
@@ -509,6 +511,70 @@ async function optimizeOrder() {
     setStatus('Optimize error: ' + e.message);
   }
   setBusy(false);
+}
+
+// ── Import a shared Google Maps route ───────────────────────────────────────
+// Parse the waypoints out of a Google Maps directions URL (/maps/dir/A/B/C).
+// Each segment is a place name or a "lat,lon" pair.
+function parseGoogleDir(url) {
+  try {
+    const parts = new URL(url).pathname.split('/');
+    const di = parts.indexOf('dir');
+    if (di < 0) return [];
+    const out = [];
+    for (let i = di + 1; i < parts.length; i++) {
+      const s = parts[i];
+      if (!s || s[0] === '@' || s.startsWith('data=')) break;
+      const txt = decodeURIComponent(s.replace(/\+/g, ' ')).trim();
+      if (!txt) continue;
+      const m = txt.match(/^(-?\d+\.\d+),\s*(-?\d+\.\d+)$/);
+      if (m) out.push({ lat: parseFloat(m[1]), lon: parseFloat(m[2]), label: txt });
+      else out.push({ label: txt });
+    }
+    return out;
+  } catch (e) { return []; }
+}
+
+// Top Photon hit for a place name (reuses the position bias from search).
+async function photonTop(q) {
+  const a = searchAnchor();
+  const url = 'https://photon.komoot.io/api/?lang=fr&limit=1&lat=' + a.lat + '&lon=' + a.lng
+            + '&zoom=14&location_bias_scale=0.4&q=' + encodeURIComponent(q);
+  try {
+    const f = ((await (await fetch(url)).json()).features || [])[0];
+    if (!f) return null;
+    const [lon, lat] = f.geometry.coordinates;
+    const { main, city } = formatHit(f.properties || {});
+    return { lat, lon, label: city ? `${main}, ${city}` : main };
+  } catch (e) { return null; }
+}
+
+async function importGoogleMaps() {
+  const link = (prompt('Colle un lien Google Maps (itinéraire partagé) :') || '').trim();
+  if (!link) return;
+  setStatus('Import du trajet…');
+  let url = link;
+  // Short links (maps.app.goo.gl) can't be expanded in-browser (CORS) — resolve
+  // them via the backend. A full /maps/dir/ URL is parsed directly.
+  if (!/\/maps\/dir\//.test(link)) {
+    try {
+      const apiBase = (location.pathname.match(/^.*?\/mappy/) || [''])[0];
+      const d = await (await fetch(apiBase + '/api/resolve?url=' + encodeURIComponent(link))).json();
+      if (d.url) url = d.url;
+    } catch (e) { /* maybe it was already a full URL; fall through */ }
+  }
+  const wps = parseGoogleDir(url);
+  if (!wps.length) { setStatus('Aucun arrêt trouvé dans ce lien Google Maps.'); return; }
+  let added = 0;
+  for (const w of wps) {
+    if (w.lat != null) { addStop(w.lat, w.lon, w.label); added++; }
+    else { const hit = await photonTop(w.label); if (hit) { addStop(hit.lat, hit.lon, hit.label); added++; } }
+  }
+  if (added) {
+    try { map.fitBounds(L.featureGroup(markers).getBounds().pad(0.2)); } catch (e) {}
+    setStatus(`Importé : ${added} arrêt${added > 1 ? 's' : ''}.`);
+    document.body.classList.remove('panel-open');   // mobile: reveal the map
+  } else setStatus('Impossible de géocoder les arrêts du lien.');
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

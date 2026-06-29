@@ -51,6 +51,82 @@ fn compute(req: SolveRequest) -> SolveResponse {
     SolveResponse { zones, total_km: total }
 }
 
+// ── Google Maps share-link resolver ─────────────────────────────────────────
+// Short links (maps.app.goo.gl) can't be expanded by the browser (CORS), so the
+// frontend asks us. We shell out to curl (already in the runtime image) to follow
+// the redirect and return the final /maps/dir/ URL, which the frontend parses.
+
+fn urldecode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'%' if i + 3 <= b.len() => match u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                Ok(v) => { out.push(v); i += 3; }
+                Err(_) => { out.push(b'%'); i += 1; }
+            },
+            b'+' => { out.push(b' '); i += 1; }
+            c => { out.push(c); i += 1; }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn json_escape(s: &str) -> String {
+    let mut o = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            '\r' => o.push_str("\\r"),
+            '\t' => o.push_str("\\t"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o
+}
+
+// SSRF guard: only resolve Google Maps short-link hosts, never arbitrary URLs.
+fn host_allowed(url: &str) -> bool {
+    let host = match url.split("://").nth(1)
+        .and_then(|a| a.split(|c| c == '/' || c == '?' || c == '#' || c == ':').next())
+    {
+        Some(h) => h.to_lowercase(),
+        None => return false,
+    };
+    ["maps.app.goo.gl", "goo.gl", "g.co", "maps.google.com", "www.google.com", "google.com"]
+        .contains(&host.as_str())
+}
+
+fn resolve_share(path: &str) -> String {
+    let query = path.splitn(2, '?').nth(1).unwrap_or("");
+    let raw = query.split('&').find_map(|kv| kv.strip_prefix("url=")).unwrap_or("");
+    let url = urldecode(raw);
+    if !host_allowed(&url) {
+        return "{\"error\":\"unsupported url\"}".to_string();
+    }
+    let out = std::process::Command::new("curl")
+        .args([
+            "-sL", "-o", "/dev/null", "--max-time", "8", "--max-redirs", "5",
+            "-A", "Mozilla/5.0", "-w", "%{url_effective}", url.as_str(),
+        ])
+        .output();
+    match out {
+        Ok(o) => {
+            let final_url = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if final_url.is_empty() {
+                "{\"error\":\"resolve failed\"}".to_string()
+            } else {
+                format!("{{\"url\":\"{}\"}}", json_escape(&final_url))
+            }
+        }
+        Err(_) => "{\"error\":\"resolve failed\"}".to_string(),
+    }
+}
+
 fn handle(stream: TcpStream) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut stream = stream;
@@ -90,6 +166,12 @@ fn handle(stream: TcpStream) {
             let _ = write!(stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                 json.len(), json);
+        }
+        ("GET", p) if p.starts_with("/api/resolve?") => {
+            let body = resolve_share(p);
+            let _ = write!(stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(), body);
         }
         ("OPTIONS", _) => {
             let _ = stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
