@@ -348,10 +348,15 @@ async function geocode(q) {
     // nearer, more important places rank first; location_bias_scale pushes that
     // proximity weighting up. zoom matches the bias radius to the current view.
     const a = searchAnchor();
-    const z = Math.round(map.getZoom());
-    const url = 'https://photon.komoot.io/api/?lang=fr&limit=8'
+    // Bias hard toward the user's position (location_bias_scale=1) so nearby
+    // businesses/POIs that exist in OSM rank first, like "CGI" near Pau. Clamp
+    // the bias zoom to a city scale (>=12) so it stays local even when the whole
+    // map is zoomed out. NB: OSM is missing many businesses (e.g. Telerad
+    // Bayonne) — those can't be found without a commercial Places API.
+    const z = Math.min(16, Math.max(12, Math.round(map.getZoom())));
+    const url = 'https://photon.komoot.io/api/?lang=fr&limit=10'
               + '&lat=' + a.lat + '&lon=' + a.lng
-              + '&zoom=' + z + '&location_bias_scale=0.6'
+              + '&zoom=' + z + '&location_bias_scale=1'
               + '&q=' + encodeURIComponent(q);
     const res = await fetch(url);
     if (mine !== seq) return;                 // a newer query superseded this one
