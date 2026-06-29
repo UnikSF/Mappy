@@ -313,10 +313,10 @@ let seq = 0;          // request sequence; drop replies that aren't the latest
 searchInput.addEventListener('input', () => {
   clearTimeout(debounce);
   const q = searchInput.value.trim();
-  if (q.length < 3) { hideResults(); return; }
+  if (q.length < 2) { hideResults(); return; }
   searchResults.innerHTML = '<li class="loading">Searching…</li>';
   searchResults.style.display = 'block';
-  debounce = setTimeout(() => geocode(q), 300);
+  debounce = setTimeout(() => geocode(q), 200);
 });
 
 searchInput.addEventListener('keydown', e => {
@@ -343,25 +343,36 @@ function searchAnchor() {
 async function geocode(q) {
   const mine = ++seq;
   try {
-    // Bias toward what the user is looking at (Nominatim viewbox, unbounded =
-    // preference not filter) — same "near me" feel as Google Maps.
-    const b = map.getBounds();
-    const viewbox = [b.getWest(), b.getNorth(), b.getEast(), b.getSouth()].join(',');
-    // Pull a wider candidate set than we'll show, so the distance sort below has
-    // something to reorder.
-    const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=12&addressdetails=1'
-              + '&viewbox=' + viewbox + '&q=' + encodeURIComponent(q);
-    const res = await fetch(url, { headers: { 'Accept-Language': 'fr,en' } });
+    // Photon (Komoot) — an OSM typeahead geocoder built for as-you-type search,
+    // same as Google Maps / Waze. lat/lon bias the ranking toward the user so
+    // nearer, more important places rank first; location_bias_scale pushes that
+    // proximity weighting up. zoom matches the bias radius to the current view.
+    const a = searchAnchor();
+    const z = Math.round(map.getZoom());
+    const url = 'https://photon.komoot.io/api/?lang=fr&limit=8'
+              + '&lat=' + a.lat + '&lon=' + a.lng
+              + '&zoom=' + z + '&location_bias_scale=0.6'
+              + '&q=' + encodeURIComponent(q);
+    const res = await fetch(url);
     if (mine !== seq) return;                 // a newer query superseded this one
     if (!res.ok) { hideResults(); return; }
-    const hits = await res.json();
-    // Weight by distance: closer = more relevant. Sort matches by distance from
-    // the anchor (ascending) and keep the nearest 6.
-    const a = searchAnchor();
-    hits.forEach(h => { h._km = distKm(a.lat, a.lng, parseFloat(h.lat), parseFloat(h.lon)); });
-    hits.sort((x, y) => x._km - y._km);
-    renderSearchResults(hits.slice(0, 6));
+    const data = await res.json();
+    const hits = (data.features || []).map(f => {
+      const [lon, lat] = f.geometry.coordinates;
+      return { lat, lon, p: f.properties || {}, _km: distKm(a.lat, a.lng, lat, lon) };
+    });
+    renderSearchResults(hits);                 // keep Photon's relevance order
   } catch { if (mine === seq) hideResults(); }
+}
+
+// Photon properties → a "Main line" + "City · 75001 · France" subtitle, the way
+// Google/Waze format a suggestion.
+function formatHit(p) {
+  const street = [p.housenumber, p.street].filter(Boolean).join(' ');
+  const main   = p.name || street || p.city || p.state || p.country || '?';
+  const city   = p.city || p.county || p.state || '';
+  return { main, city, sub: [street && street !== main ? street : '', city, p.postcode, p.country]
+                              .filter(Boolean).filter(s => s !== main) };
 }
 
 function renderSearchResults(hits) {
@@ -373,18 +384,14 @@ function renderSearchResults(hits) {
     return;
   }
   hits.forEach(h => {
-    const li   = document.createElement('li');
-    const addr = h.address || {};
-    const main = addr.road || addr.amenity || addr.suburb || h.display_name.split(',')[0];
-    const city = addr.city || addr.town || addr.village || '';
-    const dist = h._km != null ? (h._km < 1 ? Math.round(h._km * 1000) + ' m' : h._km.toFixed(1) + ' km') : '';
-    const sub  = [dist, city, addr.postcode, addr.country].filter(Boolean).join(' · ');
-    li.innerHTML = `<div>${main}</div><div class="sub">${sub || h.display_name}</div>`;
+    const li = document.createElement('li');
+    const { main, city, sub } = formatHit(h.p);
+    const dist = h._km != null ? (h._km < 1 ? Math.round(h._km * 1000) + ' m' : h._km.toFixed(0) + ' km') : '';
+    const subline = [dist, ...sub].filter(Boolean).join(' · ');
+    li.innerHTML = `<div>${main}</div><div class="sub">${subline || ''}</div>`;
     li.onclick = () => {
-      const lat = parseFloat(h.lat), lon = parseFloat(h.lon);
-      map.setView([lat, lon], 14);
-      const label = city ? `${main}, ${city}` : main;
-      addStop(lat, lon, label);
+      map.setView([h.lat, h.lon], 14);
+      addStop(h.lat, h.lon, city ? `${main}, ${city}` : main);
       searchInput.value = '';
       hideResults();
     };
