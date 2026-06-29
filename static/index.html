@@ -335,6 +335,11 @@ function setActive(i) {
   if (items[i]) items[i].scrollIntoView({ block: 'nearest' });
 }
 
+// Proximity anchor: your live GPS dot if navigating, else the map center.
+function searchAnchor() {
+  return userMarker ? userMarker.getLatLng() : map.getCenter();
+}
+
 async function geocode(q) {
   const mine = ++seq;
   try {
@@ -342,12 +347,20 @@ async function geocode(q) {
     // preference not filter) — same "near me" feel as Google Maps.
     const b = map.getBounds();
     const viewbox = [b.getWest(), b.getNorth(), b.getEast(), b.getSouth()].join(',');
-    const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=6&addressdetails=1'
+    // Pull a wider candidate set than we'll show, so the distance sort below has
+    // something to reorder.
+    const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=12&addressdetails=1'
               + '&viewbox=' + viewbox + '&q=' + encodeURIComponent(q);
     const res = await fetch(url, { headers: { 'Accept-Language': 'fr,en' } });
     if (mine !== seq) return;                 // a newer query superseded this one
     if (!res.ok) { hideResults(); return; }
-    renderSearchResults(await res.json());
+    const hits = await res.json();
+    // Weight by distance: closer = more relevant. Sort matches by distance from
+    // the anchor (ascending) and keep the nearest 6.
+    const a = searchAnchor();
+    hits.forEach(h => { h._km = distKm(a.lat, a.lng, parseFloat(h.lat), parseFloat(h.lon)); });
+    hits.sort((x, y) => x._km - y._km);
+    renderSearchResults(hits.slice(0, 6));
   } catch { if (mine === seq) hideResults(); }
 }
 
@@ -364,7 +377,8 @@ function renderSearchResults(hits) {
     const addr = h.address || {};
     const main = addr.road || addr.amenity || addr.suburb || h.display_name.split(',')[0];
     const city = addr.city || addr.town || addr.village || '';
-    const sub  = [city, addr.postcode, addr.country].filter(Boolean).join(' · ');
+    const dist = h._km != null ? (h._km < 1 ? Math.round(h._km * 1000) + ' m' : h._km.toFixed(1) + ' km') : '';
+    const sub  = [dist, city, addr.postcode, addr.country].filter(Boolean).join(' · ');
     li.innerHTML = `<div>${main}</div><div class="sub">${sub || h.display_name}</div>`;
     li.onclick = () => {
       const lat = parseFloat(h.lat), lon = parseFloat(h.lon);
