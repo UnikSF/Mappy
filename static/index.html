@@ -38,9 +38,10 @@
     color: #222; border-bottom: 1px solid #f0f0f0; line-height: 1.4;
   }
   #search-results li:last-child { border-bottom: none; }
-  #search-results li:hover { background: #f0f6ff; }
+  #search-results li:hover, #search-results li.active { background: #f0f6ff; }
   #search-results li .sub { font-size: 11px; color: #888; margin-top: 2px; }
-  #search-results li.no-result { color: #aaa; font-style: italic; cursor: default; }
+  #search-results li.no-result,
+  #search-results li.loading { color: #aaa; font-style: italic; cursor: default; }
 
   /* Stops list */
   #stops-list { display: flex; flex-direction: column; gap: 5px; }
@@ -300,34 +301,59 @@ map.on('click', e => {
 });
 
 // ── Search (Nominatim) ───────────────────────────────────────────────────────
+// Google-Maps-style: debounced autocomplete, biased toward the current map view,
+// arrow-key navigation, and a stale-response guard so a slow reply can't clobber
+// a newer query.
 const searchInput   = document.getElementById('search-input');
 const searchResults = document.getElementById('search-results');
 let debounce = null;
+let activeIdx = -1;   // highlighted suggestion (keyboard nav)
+let seq = 0;          // request sequence; drop replies that aren't the latest
 
 searchInput.addEventListener('input', () => {
   clearTimeout(debounce);
   const q = searchInput.value.trim();
   if (q.length < 3) { hideResults(); return; }
-  debounce = setTimeout(() => geocode(q), 400);
+  searchResults.innerHTML = '<li class="loading">Searching…</li>';
+  searchResults.style.display = 'block';
+  debounce = setTimeout(() => geocode(q), 300);
 });
 
 searchInput.addEventListener('keydown', e => {
-  if (e.key === 'Escape') { hideResults(); searchInput.blur(); }
+  const items = searchResults.querySelectorAll('li:not(.no-result):not(.loading)');
+  if (e.key === 'Escape') { hideResults(); searchInput.blur(); return; }
+  if (!items.length) return;
+  if (e.key === 'ArrowDown')      { e.preventDefault(); setActive(Math.min(activeIdx + 1, items.length - 1)); }
+  else if (e.key === 'ArrowUp')   { e.preventDefault(); setActive(Math.max(activeIdx - 1, 0)); }
+  else if (e.key === 'Enter')     { e.preventDefault(); (items[activeIdx] || items[0]).click(); }
 });
 
+function setActive(i) {
+  const items = searchResults.querySelectorAll('li:not(.no-result):not(.loading)');
+  items.forEach((el, k) => el.classList.toggle('active', k === i));
+  activeIdx = i;
+  if (items[i]) items[i].scrollIntoView({ block: 'nearest' });
+}
+
 async function geocode(q) {
+  const mine = ++seq;
   try {
-    const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=6&addressdetails=1&q='
-              + encodeURIComponent(q);
+    // Bias toward what the user is looking at (Nominatim viewbox, unbounded =
+    // preference not filter) — same "near me" feel as Google Maps.
+    const b = map.getBounds();
+    const viewbox = [b.getWest(), b.getNorth(), b.getEast(), b.getSouth()].join(',');
+    const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=6&addressdetails=1'
+              + '&viewbox=' + viewbox + '&q=' + encodeURIComponent(q);
     const res = await fetch(url, { headers: { 'Accept-Language': 'fr,en' } });
+    if (mine !== seq) return;                 // a newer query superseded this one
     if (!res.ok) { hideResults(); return; }
-    const hits = await res.json();
-    renderSearchResults(hits);
-  } catch { hideResults(); }
+    renderSearchResults(await res.json());
+  } catch { if (mine === seq) hideResults(); }
 }
 
 function renderSearchResults(hits) {
   searchResults.innerHTML = '';
+  activeIdx = -1;
   if (!hits.length) {
     searchResults.innerHTML = '<li class="no-result">No results found</li>';
     searchResults.style.display = 'block';
@@ -353,7 +379,7 @@ function renderSearchResults(hits) {
   searchResults.style.display = 'block';
 }
 
-function hideResults() { searchResults.style.display = 'none'; }
+function hideResults() { searchResults.style.display = 'none'; activeIdx = -1; }
 
 document.addEventListener('click', e => {
   if (!document.getElementById('search-wrap').contains(e.target)) hideResults();
